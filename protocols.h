@@ -62,11 +62,11 @@ char *sRecv(int socket, char *msg) {
 }
 
 char *uRecv(int socket, char *msg, struct sockaddr *addr) {
-	char buffer[255];
+	char buffer[1024];
 	char length[4];
 	int len;
 	unsigned int sockSize = sizeof(*addr);
-	if ((addr ? recvfrom(socket, buffer, 255, 0, addr, &sockSize) : recv(socket, buffer, 255, 0)) > 0) {
+	if ((addr ? recvfrom(socket, buffer, 1024, 0, addr, &sockSize) : recv(socket, buffer, 1024, 0)) > 0) {
 		strncpy(length, &buffer[1], 3);
 		length[3] = '\0';
 		len = atoi(length);

@@ -31,6 +31,18 @@ int main(int argc, char const *argv[])
 	sleep(10);
 
 	comm.setAutoMark(false);
+
+	struct timespec tv;
+	tv.tv_sec = 1;
+	tv.tv_nsec = 0;
+	CommObj mComm;
+	mComm.setValues('T', comm.getFPID(), "", comm.getCastAddr(false));
+
+	while (comm.recv(comm.getSocket(true), mComm, &tv)) {
+		cout << mComm.getEncoded() << endl;
+	}
+
+	cout << "Fin." << endl;
 	
 	// cout << endl << "--- MultiCast Test ---" << endl;
 
