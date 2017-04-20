@@ -329,9 +329,12 @@ CommObj* Communicator::recv(int sock, CommObj& comm, bool skipQueue, struct time
 			ret = pselect(sock + 1, &sockFDs, NULL, NULL, tv, NULL) > 0 && FD_ISSET(sock, &sockFDs);
 		}
 		 if (ret) {
-		 	uRecv(sock, buffer, (struct sockaddr *) addr);
-			comm.markSeqNum(lClock->getClock());
-			return comm.decode(buffer, addr);
+		 	if(uRecv(sock, buffer, (struct sockaddr *) addr)) {
+				comm.markSeqNum(lClock->getClock());
+				return comm.decode(buffer, addr);
+			} else {
+				return NULL;
+			}
 		} else {
 			return NULL;
 		}
@@ -345,9 +348,12 @@ CommObj* Communicator::recv(int sock, CommObj& comm) {
 void* Communicator::setOrderedRecv(void* arg) {
 	Communicator *self = (Communicator*) arg;
 	int requiredAcks = self->getGroupSize();
+	struct timespec tv;
+	tv.tv_sec = 0;
+	tv.tv_nsec = 500000000;
 	unordered_map<string, pair<bool, int>> msgs;
 	CommObj aComm, *mComm;
-	string topSeq;
+	string lastStableInsert = "0000000000000.0";
 	pair<string, int> dropRequests = pair<string, int>("", 0);
 	const int maxRequestDelay = 10;
 
@@ -355,41 +361,38 @@ void* Communicator::setOrderedRecv(void* arg) {
 
 	do {
 		mComm = new CommObj;
-		mComm->setValues('M', self->fixedPID, self->fixedPID, self->getCastAddr(false));
-		
-		if (!self->autoMarkSeq) {
-			if (!self->unstableQueue.empty()){
-				aComm.set(self->unstableQueue.top());
+		mComm -> setValues('M', self->fixedPID, self->fixedPID, self->getCastAddr(false));
 
-				string counter = "-, -";
-				bool ackSent = false;
-				if (msgs.count(aComm.seqNum) > 0) {
-					ackSent = msgs.at(aComm.seqNum).first;
-					counter = itos(ackSent) + ", " + itos(msgs.at(aComm.seqNum).second);
-				} else {
-					msgs.insert(pair<string, pair<bool, int>>(aComm.seqNum, pair<bool, int>(false, 0)));
-				}
-				cout << "Queue Not Empty [" << aComm.seqNum << "], <" << counter << ">" << aComm.msg << endl;
+		// if (!self->autoMarkSeq) {
+		// 	if (!self->unstableQueue.empty()) {
+		// 		aComm.set(self->unstableQueue.top());
+		// 		string counter = "-,-";
+
+		// 		bool ackSent = false;
+		// 		if (msgs.count(aComm.seqNum) > 0) {
+		// 			ackSent = msgs.at(aComm.seqNum).first;
+		// 			counter = itos(ackSent) + ", " + itos(msgs.at(aComm.seqNum).second);
+		// 		} else {
+		// 			msgs.insert(pair<string, pair<bool, int>>(aComm.seqNum, pair<bool, int>(false, 0)));
+		// 		}
+		// 		cout << "Queue Not Empty [" << aComm.seqNum << "], <" << counter << ">" << aComm.msg << endl;
 				
-				if (!ackSent) {
-					aComm.control = 'A';
-					self->send(self->getSocket(true), aComm);
-					msgs.at(aComm.seqNum).first = true;
-					cout << "TOP ACK: [" << aComm.getStringSeq() << "] " << aComm.control << " " << aComm.pid << " " << aComm.msg << " <1, " << itos(msgs.at(aComm.seqNum).second) << ">" << endl;
+		// 		if (!ackSent) {
+		// 			aComm.control = 'A';
+		// 			self->send(self->getSocket(true), aComm);
+		// 			msgs.at(aComm.seqNum).first = true;
+		// 			cout << "TOP ACK: [" << aComm.getStringSeq() << "] " << aComm.control << " " << aComm.pid << " " << aComm.msg << " <1, " << itos(msgs.at(aComm.seqNum).second) << ">" << endl;
 				
-				}
+		// 		}
 
-				if (aComm.control == 'X' && msgs.at(aComm.seqNum).second >= requiredAcks) {
-					break;
-				}
-			} else {
-				cout << "Queue is empty" << endl;
-			}
-		}
+		// 		if (aComm.control == 'X' && msgs.at(aComm.seqNum).second >= requiredAcks) {
+		// 			break;
+		// 		}	
+		// 	}
+		// }
 
-		if (self->recv(self->getSocket(true), *mComm, true, NULL)) {
-			pthread_mutex_lock(&self->queueLock);
-			cout << "REC: [" << mComm->getStringSeq() << "] " << mComm->control << " " << mComm->pid << " " << mComm->msg << endl;
+		if (self->recv(self->getSocket(true), *mComm, true, &tv)) {
+			cout << "REC: [" << mComm->getStringSeq() << "] " << mComm->control << " " << mComm->pid << " " << mComm->msg << " | ";
 
 			if (mComm->control == 'A') {
 				if (msgs.count(mComm->seqNum) > 0){
@@ -397,7 +400,7 @@ void* Communicator::setOrderedRecv(void* arg) {
 				} else {
 					msgs.insert(pair<string, pair<bool, int>>(mComm->seqNum, pair<bool, int>((mComm->pid == self->getFPID()), 1)));
 				}
-				cout << "A Counter <" << itos(msgs.at(mComm->seqNum).first) << ", " << itos(msgs.at(mComm->seqNum).second) << ">" << endl;
+				cout << "ack <" << itos(msgs.at(mComm->seqNum).first) << ", " << itos(msgs.at(mComm->seqNum).second) << ">" << " ";
 				delete mComm;
 			} else if ((mComm->control == 'M' || mComm->control == 'X') && mComm->pid != self->getFPID()) {
 				self->lClock->markEvent();
@@ -406,56 +409,80 @@ void* Communicator::setOrderedRecv(void* arg) {
 				if (mComm->control == 'X') {
 					self->setAutoMark(false);
 				}
-			} else if (mComm->control == 'R' && (mComm->pid == self->getFPID() || *mComm < self->unstableQueue.top())) {
+			} else if (mComm->control == 'R' && mComm->seqNum <= lastStableInsert) {
+				if (!self->unstableQueue.empty()){
+					aComm.set(self->unstableQueue.top());
+					cout << "TOP: [" << aComm.getStringSeq() << "] " << aComm.control << " " << aComm.pid << " " << aComm.msg << " | ";
+				} else {
+					cout << "TOP: EMPTY | ";
+				}
 				aComm.set(*mComm);
 				aComm.control = 'A';
+				aComm.pid = self->getFPID();
+				aComm.addr = self->getCastAddr(true);
 				self->send(self->getSocket(true), aComm);
+				delete mComm;
 			} else if (mComm->pid != self->getFPID()){
-				cout << "ROGUE CONTROL <" << mComm->control << " " << mComm->msg;
+				cout << "ROGUE CAPTURE ";
+				delete mComm;
 			}
-
-			if (!self->unstableQueue.empty()) {
-				topSeq = self->unstableQueue.top().seqNum;
-
-				if (msgs.count(topSeq) == 0) {
-					msgs.insert(pair<string, pair<bool, int>>(topSeq, pair<bool, int>(false, 0)));
-				}
-
-				if (!msgs.at(topSeq).first) {
-					aComm.set(self->unstableQueue.top());
-					aComm.control = 'A';
-					self->send(self->getSocket(true), aComm);
-					msgs.at(topSeq).first = true;
-					cout << "TOP ACK: [" << aComm.getStringSeq() << "] " << aComm.control << " " << aComm.pid << " " << aComm.msg << " <1, " << itos(msgs.at(topSeq).second) << ">" << endl;
-				}
-
-				 
-				if (msgs.at(topSeq).second >= requiredAcks) {
-					if (self->unstableQueue.top().control != 'X') {
-						cout << endl << "Marking STABLE: [" << self->unstableQueue.top().seqNum << "] " << self->unstableQueue.top().msg;
-						self->stableQueue.push(self->unstableQueue.top());
-						self->unstableQueue.pop();
-						pthread_cond_signal(&self->cond_wait);
-					}
-				} else if(dropRequests.first == topSeq){
-					if (++dropRequests.second >= maxRequestDelay) {
-						aComm.set(self->unstableQueue.top());
-						aComm.control = 'R';
-						msgs.at(topSeq).first = false;
-						msgs.at(topSeq).second = 0;
-						self->lClock->markEvent();
-						self->send(self->getSocket(true), aComm);
-						cout << "REQUESTING: [" << aComm.getStringSeq() << "] " << aComm.control << " " << aComm.pid << " " << aComm.msg << endl;
-					}
-				} else {
-					dropRequests.first = topSeq;
-					dropRequests.second = 0;
-				}
-			}
-			cout << endl << endl;
-			pthread_mutex_unlock(&self->queueLock);
-			sleep(2);
+		} else {
+			delete mComm;
 		}
+
+		pthread_mutex_lock(&self->queueLock);
+		if (!self->unstableQueue.empty()) {
+			aComm.set(self->unstableQueue.top());
+
+			//Create a counter for message if doesn't exist
+			if (msgs.count(aComm.seqNum) == 0) {
+				msgs.insert(pair<string, pair<bool, int>>(aComm.seqNum, pair<bool, int>(false, 0)));
+			}
+
+			//Send Ack if not done so
+			if (!msgs.at(aComm.seqNum).first) {
+				aComm.control = 'A';
+				aComm.pid = self->getFPID();
+				aComm.addr = self->getCastAddr(true);
+				self->send(self->getSocket(true), aComm);
+				msgs.at(aComm.seqNum).first = true;
+				cout << "TOP ACK: [" << aComm.getStringSeq() << "] " << aComm.control << " " << aComm.pid << " " << aComm.msg;
+				cout << " ack <1, " << itos(msgs.at(aComm.seqNum).second) << ">" << endl;
+			}
+			
+			//Add to stable Queue if all acks are received
+			if (msgs.at(aComm.seqNum).second >= requiredAcks) {
+				if (aComm.control != 'X') {
+					cout << endl << "Marking STABLE: [" << aComm.seqNum << "] " << aComm.msg;
+					self->stableQueue.push(self->unstableQueue.top());
+					self->unstableQueue.pop();
+					lastStableInsert = aComm.seqNum;
+					pthread_cond_signal(&self->cond_wait);
+				} else {
+					while (!self->unstableQueue.empty()) {
+						self->unstableQueue.pop();
+					}
+				}
+			} else if(dropRequests.first == aComm.seqNum) {
+				if (++dropRequests.second >= maxRequestDelay) {
+					aComm.control = 'R';
+					aComm.pid = self->getFPID();
+					aComm.addr = self->getCastAddr(true);
+					msgs.at(aComm.seqNum).first = false;
+					msgs.at(aComm.seqNum).second = 0;
+					self->lClock->markEvent();
+					self->send(self->getSocket(true), aComm);
+					dropRequests.second = 0;
+					cout << "REQUESTING: [" << aComm.getStringSeq() << "] " << aComm.control << " " << aComm.pid << " " << aComm.msg << endl;
+				}
+			} else {
+				dropRequests.first = aComm.seqNum;
+				dropRequests.second = 0;
+			}
+		}
+		pthread_mutex_unlock(&self->queueLock);
+
+		cout << endl << endl;
 	} while (self->autoMarkSeq || !self->unstableQueue.empty());
 
 	return NULL;
