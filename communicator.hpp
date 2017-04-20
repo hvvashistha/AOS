@@ -184,28 +184,9 @@ public:
 			this->master = pid;
 		}
 
-
-		CommObj mComm;
-		mComm.setValues('T', "1111", "Test Message", this->getCastAddr(true));
-
-		struct timespec tv;
-		tv.tv_sec = 5;
-    	tv.tv_nsec = 0;
-
-		cout << "Sending: " << mComm.getEncoded() << endl;
-		this->send(this->getSocket(true), mComm);
-		mComm.setValues('U', this->getFPID(), "Updated", this->getCastAddr(false));
-		cout << "Updated: " << mComm.getEncoded() << endl;
-		while(this->recv(this->getSocket(true), mComm, true, &tv)) {
-			cout << "Received: " << mComm.getEncoded() << endl;
+		if (setupGroup) {
+			initiateGroupComm();
 		}
-		cout << "Timed out" << endl;
-
-
-
-		// if (setupGroup) {
-		// 	initiateGroupComm();
-		// }
 	}
 
 	bool isMaster() {

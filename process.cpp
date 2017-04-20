@@ -22,7 +22,7 @@ int main(int argc, char const *argv[])
 	}
 	Clock lClock;
 	Communicator comm(master, &lClock, true);
-	return 0;
+	
 	comm.berkleySync();
 	cout << endl << endl << "----Multicast total ordered----" << endl << endl;
 
