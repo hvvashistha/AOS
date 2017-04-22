@@ -5,6 +5,7 @@
 #include <errno.h>
 #include <stdlib.h>
 #include <stdio.h>
+#include "exception.hpp"
 
 #define __PROTOCOLS__
 
@@ -88,7 +89,7 @@ int cFormat(char msgCtrl, char buffer[]) {
 
 //Format message into predefined protocol format before sending
 int mFormat(const char *msg, int length, char buffer[]) {
-	snprintf(buffer, 252, "%c%03d%c%s", SOH, length, STX, msg);
+	snprintf(buffer, length + 7, "%c%03d%c%s", SOH, length, STX, msg);
 	buffer[length + 5] = ETX;
 	buffer[length + 6] = ETB;
 	buffer[length + 7] = '\0';

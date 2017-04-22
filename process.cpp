@@ -5,11 +5,11 @@
 #include "lamport.hpp"
 #include <string>
 #include <unistd.h>
+#include "exception.hpp"
 
 using namespace std;
 
-int main(int argc, char const *argv[])
-{	
+int main(int argc, char const *argv[]) {
 	bool master = false;
 	if (argc < 2) {
 		cout << "Usage: sender <message> [master]" << endl;
@@ -21,29 +21,34 @@ int main(int argc, char const *argv[])
 		cout << "master" << endl;
 	}
 	Clock lClock;
-	Communicator comm(master, &lClock, true);
-	
-	comm.berkleySync();
-	cout << endl << endl << "----Multicast total ordered----" << endl << endl;
+	try {
+		Communicator comm(master, &lClock, true);
 
-	comm.setAutoMark(true);
+		comm.berkleySync();
+		cout << endl << endl << "----Multicast total ordered----" << endl << endl;
 
-	sleep(10);
+		sleep(5);
+		comm.setAutoMark(true);
 
-	comm.setAutoMark(false);
+		struct timespec tv;
+		tv.tv_sec = 1;
+		tv.tv_nsec = 0;
+		CommObj mComm;
+		mComm.setValues('T', comm.getFPID(), "", comm.getCastAddr(false));
+		int i = 1;
 
-	struct timespec tv;
-	tv.tv_sec = 1;
-	tv.tv_nsec = 0;
-	CommObj mComm;
-	mComm.setValues('T', comm.getFPID(), "", comm.getCastAddr(false));
+		while (comm.recv(comm.getSocket(true), mComm, false, &tv)) {
+			cout << i++ << ": " << mComm.getEncoded() << endl;
+		}
+		comm.multicastFinish();
 
-	while (comm.recv(comm.getSocket(true), mComm, &tv)) {
-		cout << mComm.getEncoded() << endl;
+	} catch (COMMException& e) {
+		cerr << e.what() << endl;
+		exit(1);
 	}
 
 	cout << "Fin." << endl;
-	
+
 	// cout << endl << "--- MultiCast Test ---" << endl;
 
 	// CommObj *sSomm, *rComm;

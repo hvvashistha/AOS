@@ -45,6 +45,15 @@ public:
 		pthread_mutex_unlock(&mLock);
 		return seq;
 	}
+
+	long int markEvent(long int seqNum) {
+		long int seq;
+		pthread_mutex_lock(&mLock);
+		eventSequece = max(getClock(), seqNum) + 1;
+		seq = eventSequece;
+		pthread_mutex_unlock(&mLock);
+		return seq;
+	}
 };
 
 

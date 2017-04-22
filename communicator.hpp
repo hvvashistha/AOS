@@ -18,10 +18,13 @@
 #include <algorithm>
 #include <pthread.h>
 #include <queue>
+#include <algorithm>
+#include "exception.hpp"
 
 #define __COMMUNICATOR__
 #define HELLO_PORT 12345
 #define HELLO_GROUP "225.0.0.37"
+#define DEBUG false
 
 using namespace std;
 typedef struct sockaddr_in SockAddr;
@@ -29,12 +32,14 @@ typedef struct sockaddr_in SockAddr;
 string itos(long int num) {
 	ostringstream oss;
 	oss << num;
+	if (!oss.good()) throw COMMException("itos(): stream error");
 	return oss.str();
 }
 
 string dtos(double num) {
 	ostringstream oss;
 	oss << num;
+	if (!oss.good()) throw COMMException("dtos(): stream error");
 	return oss.str();
 }
 
@@ -43,17 +48,6 @@ long int randomize() {
 	random_device rd1;
 	return pidDist(rd1);
 }
-
-// double stod (string s) {
-// 	try {
-// 		return stod(s);
-// 	} catch (exception& e) {
-// 		cerr << "Rogue String (" << s << ")";
-// 		throw e;
-// 	}
-// }
-
-void* distribute(void* arg);
 
 class CommObj {
 private:
@@ -66,7 +60,9 @@ public:
 
 
 	CommObj() {
-		seqNum = "0.0";
+		ostringstream oss;
+		oss << setfill('0') << setw(15) << (itos(0) + "." + pid);
+		seqNum = oss.str();
 		addr = NULL;
 	}
 
@@ -88,28 +84,21 @@ public:
 	}
 
 	CommObj* decode(const char *msg, SockAddr* addr) {
-		try {
-			istringstream iss(msg);
-			char buffer[1024];
-			iss >> seqNum >> control >> pid >> std::ws;
-			iss.get(buffer, 1024);
-			this->msg = buffer;
-			this->addr = addr;
-			stod(getStringSeq());
-		} catch (exception& e) {
-			cerr << "ROGUE stream" << endl;
-			cerr << "Original message : " << msg << endl;
-			cerr << "Decoded: <" << getStringSeq() << ", " << control << ", " << pid << ", " << this->msg << ", " << this->addr << endl;
-			cerr << "Error, Invalid stream, Dropping packet" << endl;
-			return NULL;
-		}
-
+		istringstream iss(msg);
+		char buffer[1024];
+		iss >> seqNum >> control >> pid >> std::ws;
+		if (!iss.good()) throw COMMException("CommObj::decode(): stream error (" + string(msg) + ")");
+		iss.get(buffer, 1024);
+		this->msg = buffer;
+		this->addr = addr;
 		return this;
 	}
 
 	CommObj* markSeqNum(long int seq) {
 		ostringstream oss;
-		oss << setfill('0') << setw(15) << (itos(seq) + "." + pid);
+		string S = (itos(seq) + "." + pid);
+		oss << setfill('0') << setw(15) << S;
+		if (!oss.good()) throw COMMException("markSeqNum(): stream error");
 		seqNum = oss.str();
 		return this;
 	}
@@ -117,6 +106,7 @@ public:
 	string getEncoded() const {
 		ostringstream oss;
 		oss << getStringSeq() << " " << control << " " << pid << " " << msg;
+		if (!oss.good()) throw COMMException("getEncoded(): stream error");
 		return oss.str();
 	}
 
@@ -146,7 +136,7 @@ private:
 	long int master;
 	long int pid;
 	bool autoMarkSeq = false;
-	string fixedPID;
+	string fixedPID, selfAlias;
 	unordered_map <long int, int> processAlias;
 	priority_queue<CommObj> unstableQueue;
 	queue<CommObj> stableQueue;
@@ -162,7 +152,7 @@ private:
 	void initiateGroupComm();
 	static void* setOrderedRecv(void* arg);
 	static void* contSend(void* arg);
-	CommObj* recv(int sock, CommObj& comm, bool skipQueue, struct timespec *tv);
+
 
 
 public:
@@ -180,14 +170,10 @@ public:
 			perror("getsockname");
 		}
 
-		ostringstream* oss = new ostringstream;
-		*oss << randomize() << sin.sin_port;
-		fixedPID = oss->str();
-		delete oss;
-		oss = new ostringstream;
-		*oss << setfill('0') << setw(15) << fixedPID;
-		fixedPID = oss->str();
-		delete oss;
+		ostringstream oss;
+		oss << setfill('0') << setw(15) << itos(randomize()) + itos(sin.sin_port);
+		fixedPID = oss.str();
+		selfAlias = fixedPID;
 		pid = stol(fixedPID);
 		cout << "PID: " << pid << endl;
 
@@ -198,6 +184,7 @@ public:
 		if (setupGroup) {
 			initiateGroupComm();
 		}
+		selfAlias = itos(getRank());
 	}
 
 	bool isMaster() {
@@ -205,27 +192,40 @@ public:
 	}
 
 	void setAutoMark(bool mark) {
+		CommObj mComm;
+		mComm.setValues('X', getAliasPid(), "Terminate", this->getCastAddr(true));
+		mComm.markSeqNum(lClock->markEvent());
+		setAutoMark(mark, mComm);
+	}
 
-		if (mark && !autoMarkSeq) {
-			cout << "Ordered multicast initiated" << endl;
-			autoMarkSeq = mark;
-			pthread_attr_init(&rattr);
-			pthread_attr_init(&sattr);
-			pthread_create(&receiver, &rattr, Communicator::setOrderedRecv, this);
-			pthread_create(&sender, &sattr, Communicator::contSend, this);
-		} else if (!mark && autoMarkSeq) {
-			cout << "Terminating Ordered multicast" << endl;
-			CommObj mComm;
-			string term = "Terminate";
-			autoMarkSeq = mark;
-			mComm.setValues('X', getFPID(), term, this->getCastAddr(true));
-			pthread_mutex_lock(&unstableQueueLock);
-			mComm.markSeqNum(lClock->markEvent());
-			this->send(this->getSocket(true), mComm);
-			this->unstableQueue.push(mComm);
-			pthread_mutex_unlock(&unstableQueueLock);
-			mComm.control = 'A';
-			this->send(this->getSocket(true), mComm);
+	void setAutoMark(bool mark, CommObj mComm) {
+		try {
+			if (mark && !autoMarkSeq) {
+				cout << "Ordered multicast initiated" << endl;
+				autoMarkSeq = mark;
+				pthread_attr_init(&rattr);
+				pthread_attr_init(&sattr);
+				pthread_create(&receiver, &rattr, Communicator::setOrderedRecv, this);
+				pthread_create(&sender, &sattr, Communicator::contSend, this);
+			} else if (!mark && autoMarkSeq) {
+				if (DEBUG)
+					cout << "Terminating Ordered multicast" << endl;
+				mComm.setValues('X', getAliasPid(), "Terminate", this->getCastAddr(true));
+				this->unstableQueue.push(mComm);
+				autoMarkSeq = mark;
+				this->send(this->getSocket(true), mComm);
+				mComm.control = 'A';
+				this->send(this->getSocket(true), mComm);
+			}
+		} catch (exception& e) {
+			COMMException ex("Communicator::setAutoMark(bool, CommObj)");
+			ex.appendInfo(e.what());
+			throw ex;
+		}
+	}
+
+	void multicastFinish() {
+		if (!autoMarkSeq) {
 			pthread_join(sender, NULL);
 			pthread_join(receiver, NULL);
 		}
@@ -254,7 +254,7 @@ public:
 	CommObj getCommDef() {
 		CommObj mComm;
 		string temp = "";
-		mComm.setValues('D', fixedPID, temp, &mOutAddr);
+		mComm.setValues('D', getAliasPid(), temp, &mOutAddr);
 		return mComm;
 	}
 
@@ -277,11 +277,16 @@ public:
 	void send(int sock, CommObj& comm);
 
 	CommObj* recv(int sock, CommObj& comm, struct timespec *tv);
+	CommObj* recv(int sock, CommObj& comm, bool skipQueue, struct timespec *tv);
 
 	CommObj* orderedRecv();
 
 	string getFPID() {
 		return fixedPID;
+	}
+
+	string getAliasPid() {
+		return selfAlias;
 	}
 
 	static CommObj* decodeGroupCast(istringstream& iss, CommObj &mComm) {
@@ -309,192 +314,295 @@ void Communicator::send(int sock, CommObj& comm) {
 }
 
 CommObj* Communicator::recv(int sock, CommObj& comm, bool skipQueue, struct timespec* tv) {
-	SockAddr* addr = NULL;
-	char buffer[1024];
-	if (sock == mSocket) {
-		addr = comm.addr;
+	try {
+
+		if (!skipQueue) {
+			CommObj *c = NULL;
+			if (sock == mSocket && (autoMarkSeq || !stableQueue.empty())) {
+				pthread_mutex_lock(&stableQueueLock);
+				if (stableQueue.empty()) {
+					pthread_cond_wait(&cond_wait, &stableQueueLock);
+				}
+				if (!stableQueue.empty()) {
+					comm.set(stableQueue.front());
+					stableQueue.pop();
+					c = &comm;
+				}
+				pthread_mutex_unlock(&stableQueueLock);
+				return  c;
+			}
+			return NULL;
+		} else {
+			bool ret = true;
+			SockAddr* addr = NULL;
+			char buffer[1024];
+			if (sock == mSocket) {
+				addr = comm.addr;
+			}
+			if (tv) {
+				fd_set sockFDs;
+				FD_ZERO(&sockFDs);
+				FD_SET(sock , &sockFDs);
+				ret = pselect(sock + 1, &sockFDs, NULL, NULL, tv, NULL) > 0 && FD_ISSET(sock, &sockFDs);
+			}
+
+			if (ret && uRecv(sock, buffer, (struct sockaddr *) addr)) {
+				// cout << "Receiving ." << buffer << endl;
+				return comm.decode(buffer, addr);
+			}
+		}
+	} catch (COMMException& e) {
+		e.appendInfo("Communicator::recv(int, CommObj&, bool, struct timespec*)");
+		throw;
 	}
-
-
-	if (!skipQueue && sock == mSocket && (autoMarkSeq || !stableQueue.empty())) {
-		pthread_mutex_lock(&stableQueueLock);
-		if (stableQueue.empty()) {
-			pthread_cond_wait(&cond_wait, &stableQueueLock);
-		}
-		comm.set(stableQueue.front());
-		stableQueue.pop();
-		pthread_mutex_unlock(&stableQueueLock);
-		return &comm;
-	} else {
-		bool ret = true;
-		if (tv) {
-			fd_set sockFDs;
-			FD_ZERO(&sockFDs);
-			FD_SET(sock , &sockFDs);
-			ret = pselect(sock + 1, &sockFDs, NULL, NULL, tv, NULL) > 0 && FD_ISSET(sock, &sockFDs);
-		}
-
-		if (ret && uRecv(sock, buffer, (struct sockaddr *) addr)) {
-			return comm.decode(buffer, addr);
-		}
-	}
-
 	return NULL;
 }
 
 CommObj* Communicator::recv(int sock, CommObj& comm, struct timespec *tv) {
-	return recv(sock, comm, false, tv);
+	try {
+		return recv(sock, comm, true, tv);
+	} catch (COMMException& e) {
+		e.appendInfo("Communicator::recv(int, CommObj&, struct timespec*)");
+		throw;
+	}
 }
 
 void* Communicator::setOrderedRecv(void* arg) {
 	Communicator *self = (Communicator*) arg;
 	int counter = 0;
+	bool drop = true;
 	struct timespec tv;
 	tv.tv_sec = 0;
-	tv.tv_nsec = 200000000;
+	tv.tv_nsec = 100000000;
 	unordered_map<string, pair<bool, int>> msgs;
 	CommObj aComm;
 	string lastStableInsert = "0000000000000.0";
 	pair<string, int> dropRequests = pair<string, int>("", 0);
-	const int maxRequestDelay = 10, requiredAcks = self->getGroupSize();
+	const int maxRequestDelay = max(5, (int)(3 * self->getGroupSize())), requiredAcks = self->getGroupSize();
+	try {
+		do {
+			pthread_mutex_lock(&self->unstableQueueLock);
+			if (DEBUG)
+				cout << "-----------------------" << lastStableInsert << "--------------------------------" << endl;
+			aComm.setValues('M', self->getAliasPid(), "MINED PACKET", self->getCastAddr(false));
 
-	do {
-		
-		aComm.setValues('M', self->fixedPID, "MINED PACKET", self->getCastAddr(false));
+			if (self->recv(self->getSocket(true), aComm, true, &tv)) {
+				// if (DEBUG)
+					cout << "REC: " << aComm.getEncoded() << " ";
 
-		if (self->recv(self->getSocket(true), aComm, true, &tv)) {
-			// cout << "REC: [" << aComm.getStringSeq() << "] " << aComm.control << " " << aComm.pid << " " << aComm.msg << " | ";
+				if (aComm.control == 'A' && stod(aComm.getStringSeq()) > stod(lastStableInsert)) {
+					if (DEBUG)
+						cout << " ACK";
+					if (msgs.count(aComm.getStringSeq()) > 0) {
+						msgs.at(aComm.getStringSeq()).second = msgs.at(aComm.getStringSeq()).second + 1;
+						counter = 0;
+					} else if (aComm.pid == self->getAliasPid()) {
+						msgs.insert(pair<string, pair<bool, int>>(aComm.getStringSeq(), pair<bool, int>(true, 1)));
+					}
 
-			if (aComm.control == 'A') {
-				if (msgs.count(aComm.getStringSeq()) > 0) {
-					msgs.at(aComm.getStringSeq()).second = msgs.at(aComm.getStringSeq()).second + 1;
-				} else {
-					msgs.insert(pair<string, pair<bool, int>>(aComm.getStringSeq(), pair<bool, int>((aComm.pid == self->getFPID()), 1)));
-				}
-				// cout << "ack <" << itos(msgs.at(aComm.getStringSeq()).first) << ", " << itos(msgs.at(aComm.getStringSeq()).second) << ">" << " ";
+				} else if ((aComm.control == 'M' || aComm.control == 'X') && aComm.pid != self->getAliasPid()) {
+					
+					if (DEBUG)
+						cout << " PUSH";
+					self->lClock->markEvent((long int)stod(aComm.getStringSeq()));
 
-			} else if ((aComm.control == 'M' || aComm.control == 'X') && aComm.pid != self->getFPID()) {
-				pthread_mutex_lock(&self->unstableQueueLock);
-				self->lClock->markEvent();
-				self->unstableQueue.push(aComm);
-				msgs.insert(pair<string, pair<bool, int>>(aComm.getStringSeq(), pair<bool, int>(false, 0)));
-				pthread_mutex_unlock(&self->unstableQueueLock);
-				if (aComm.control == 'X') {
-					self->setAutoMark(false);
-				}
-			} else if (aComm.control == 'R' && aComm.getStringSeq() <= lastStableInsert) {
-				// if (!self->unstableQueue.empty()){
-				// 	aComm.set(self->unstableQueue.top());
-				// 	cout << "TOP: [" << aComm.getStringSeq() << "] " << aComm.control << " " << aComm.pid << " " << aComm.msg << " | ";
-				// }
-				aComm.control = 'A';
-				aComm.pid = self->getFPID();
-				aComm.addr = self->getCastAddr(true);
-				self->send(self->getSocket(true), aComm);
+					self->unstableQueue.push(aComm);
+					msgs.insert(pair<string, pair<bool, int>>(aComm.getStringSeq(), pair<bool, int>(false, 0)));
+					
+					if (aComm.control == 'X') {
+						self->setAutoMark(false, aComm);
+					}
+					counter = 0;
 
-			}
-			// else if (aComm.pid != self->getFPID()){
-			// 	cout << "ROGUE CAPTURE ";
-			// 	delete mComm;
-			// }
-		} else {
+				} else if (aComm.control == 'R') {
 
-			if (!self->autoMarkSeq && ++counter > 50) {
-				cout << "Failed to synchronize!!!" << endl;
-				pthread_mutex_lock(&self->unstableQueueLock);
-				while (!self->unstableQueue.empty()) {
-					self->unstableQueue.pop();
-				}
-				pthread_mutex_unlock(&self->unstableQueueLock);
-			}
-		}
+					if (DEBUG)
+						cout << endl << "RE: " << " R" << stod(aComm.getStringSeq()) << ", L" << stod(lastStableInsert) << " ";
 
+					if (aComm.getStringSeq() <= lastStableInsert) {
+						if (DEBUG)
+							cout << "Case 1 ";
+						aComm.control = 'A';
+						aComm.pid = self->getAliasPid();
+						aComm.addr = self->getCastAddr(true);
+						self->send(self->getSocket(true), aComm);
+						if (DEBUG)
+							cout << "RE ACK ";
+					} else if (self->getAliasPid() != aComm.pid) {
 
-		if (!self->unstableQueue.empty()) {
-			aComm.set(self->unstableQueue.top());
+						if (DEBUG)
+							cout << "Case 2 ";
+						pair<bool, int> acks = pair<bool, int>(false, 0);
 
-			//Create a counter for message if doesn't exist
-			if (msgs.count(aComm.getStringSeq()) == 0) {
-				msgs.insert(pair<string, pair<bool, int>>(aComm.getStringSeq(), pair<bool, int>(false, 0)));
-			}
+						if (msgs.count(aComm.getStringSeq()) == 0) {
+							self->unstableQueue.push(aComm);
+							msgs.insert(pair<string, pair<bool, int>>(aComm.getStringSeq(), acks));
+						}
 
-			//Send Ack if not done so
-			if (!msgs.at(aComm.getStringSeq()).first) {
-				aComm.control = 'A';
-				aComm.pid = self->getFPID();
-				aComm.addr = self->getCastAddr(true);
-				self->send(self->getSocket(true), aComm);
-				msgs.at(aComm.getStringSeq()).first = true;
-				// cout << "TOP ACK: [" << aComm.getStringSeq() << "] " << aComm.control << " " << aComm.pid << " " << aComm.msg;
-				// cout << " ack <1, " << itos(msgs.at(aComm.getStringSeq()).second) << ">" << endl;
-			}
+						msgs.at(aComm.getStringSeq()) = acks;
 
-			//Add to stable Queue if all acks are received
-			if (msgs.at(aComm.getStringSeq()).second >= requiredAcks) {
-				pthread_mutex_lock(&self->unstableQueueLock);
-				if (aComm.control != 'X') {
-					// cout << endl << "Marking STABLE: [" << aComm.getStringSeq() << "] " << aComm.msg;
-					pthread_mutex_lock(&self->stableQueueLock);
-					self->stableQueue.push(self->unstableQueue.top());
-					self->unstableQueue.pop();
-					lastStableInsert = aComm.getStringSeq();
-					pthread_cond_signal(&self->cond_wait);
-					pthread_mutex_unlock(&self->stableQueueLock);
-				} else {
-					while (!self->unstableQueue.empty()) {
-						self->unstableQueue.pop();
+					}
+				} else if (DEBUG && aComm.pid != self->getAliasPid()) {
+					if (DEBUG)
+						cout << " ROGUE";
+					if (!self->unstableQueue.empty()) {
+						CommObj mComm = self->unstableQueue.top();
+
 					}
 				}
-				pthread_mutex_unlock(&self->unstableQueueLock);
-			} else if (dropRequests.first == aComm.getStringSeq()) {
-				if (++dropRequests.second >= maxRequestDelay) {
-					aComm.control = 'R';
-					aComm.pid = self->getFPID();
-					aComm.addr = self->getCastAddr(true);
-					msgs.at(aComm.getStringSeq()).first = false;
-					msgs.at(aComm.getStringSeq()).second = 0;
-					self->lClock->markEvent();
-					self->send(self->getSocket(true), aComm);
-					dropRequests.second = 0;
-					// cout << "REQUESTING: [" << aComm.getStringSeq() << "] " << aComm.control << " " << aComm.pid << " " << aComm.msg << endl;
+
+				// if (aComm.control != 'R') {
+				// 	counter = 0;
+				// }
+
+				if (DEBUG) {
+					if (msgs.count(aComm.getStringSeq()) > 0)
+						cout << "<" << (int)msgs.at(aComm.getStringSeq()).first << "," << msgs.at(aComm.getStringSeq()).second << "> ";
+					else if (aComm.pid == self->getAliasPid()) {
+						cout << " <<1,0>>";
+					} else {
+						cout << " <<0,0, " << lastStableInsert << " >>";
+					}
+					cout << " From " << aComm.pid << endl;
 				}
-			} else {
-				dropRequests.first = aComm.getStringSeq();
-				dropRequests.second = 0;
 			}
+
+			if (!self->unstableQueue.empty()) {
+				aComm.set(self->unstableQueue.top());
+				if (DEBUG) {
+					cout << "TOP: " << aComm.getEncoded() << " ";
+					if (aComm.pid == self->getAliasPid() && msgs.count(aComm.getStringSeq()) == 0) {
+						cout << " <<1, 0>>";
+					} else {
+						cout << "<" << (int)msgs.at(aComm.getStringSeq()).first << "," << msgs.at(aComm.getStringSeq()).second << "> ";
+					}
+				}
+
+				//Create a counter for message (It is from the same process, the only use case remaining here) if doesn't exist
+				if (msgs.count(aComm.getStringSeq()) == 0 && aComm.pid == self->getAliasPid()) {
+					msgs.insert(pair<string, pair<bool, int>>(aComm.getStringSeq(), pair<bool, int>(true, 0)));
+				}
+
+				if (msgs.count(aComm.getStringSeq()) == 0) {
+					cout << "[" << self->getAliasPid() << "] ** FATAL ** :" << aComm.getEncoded();
+				}
+
+				bool weakAck = msgs.count(aComm.getStringSeq()) > 0 && (msgs.at(aComm.getStringSeq()).second >= requiredAcks ||
+				               (msgs.at(aComm.getStringSeq()).first == false && msgs.at(aComm.getStringSeq()).second == (requiredAcks - 1)));
+
+				//Send Ack if not done so
+				if (!msgs.at(aComm.getStringSeq()).first) {
+					aComm.control = 'A';
+					aComm.pid = self->getAliasPid();
+					aComm.addr = self->getCastAddr(true);
+					if (DEBUG)
+						cout << "TOP ACK ";
+					self->send(self->getSocket(true), aComm);
+					msgs.at(aComm.getStringSeq()).first = true;
+				}
+
+				//Add to stable Queue if all acks are received
+				if (weakAck) {
+					if (aComm.control != 'X') {
+						// cout << endl << "Marking STABLE: [" << aComm.getStringSeq() << "] " << aComm.msg;
+						pthread_mutex_lock(&self->stableQueueLock);
+						self->stableQueue.push(self->unstableQueue.top());
+						self->unstableQueue.pop();
+						lastStableInsert = aComm.getStringSeq();
+						msgs.erase(lastStableInsert);
+						if (DEBUG)
+							cout << "<Marking Stable>";
+						pthread_cond_signal(&self->cond_wait);
+						pthread_mutex_unlock(&self->stableQueueLock);
+					} else {
+						while (!self->unstableQueue.empty()) {
+							self->unstableQueue.pop();
+						}
+					}
+				} else if (dropRequests.first == aComm.getStringSeq()) {
+					if (++dropRequests.second >= maxRequestDelay) {
+						if (DEBUG)
+							cout << " Re-Requesting";
+						aComm.control = 'R';
+						aComm.pid = self->getAliasPid();
+						aComm.addr = self->getCastAddr(true);
+						msgs.at(aComm.getStringSeq()).first = false;
+						msgs.at(aComm.getStringSeq()).second = 0;
+						// self->lClock->markEvent();
+						self->send(self->getSocket(true), aComm);
+						dropRequests.second = 0;
+						// cout << "REQUESTING: [" << aComm.getStringSeq() << "] " << aComm.control << " " << aComm.pid << " " << aComm.msg << endl;
+					}
+				} else {
+					dropRequests.first = aComm.getStringSeq();
+					dropRequests.second = 0;
+				}
+			} else if (DEBUG) {
+				cout << "TOP: EMPTY";
+			}
+			
+			// if (DEBUG)
+				cout << endl;
+
+			if (!self->autoMarkSeq) {
+				++counter;
+				// if (DEBUG)
+					cout << "Counter: " << counter << endl;
+			}
+			pthread_mutex_unlock(&self->unstableQueueLock);
+		} while (self->autoMarkSeq || counter < (maxRequestDelay * 1.5));
+
+		if (counter > maxRequestDelay + 10) {
+			cout << "Failed to synchronize!!!" << endl;
 		}
-		
+		if (DEBUG)
+			cout << "Finish" << endl;
 
-		// cout << endl << endl;
-	} while (self->autoMarkSeq || !self->unstableQueue.empty());
+		pthread_mutex_init(&self->unstableQueueLock, NULL);
 
-	//Empty multicast receive buffer
-	aComm.addr = self->getCastAddr(false);
-	while (self->recv(self->getSocket(true), aComm, true, &tv));
+		aComm.addr = self->getCastAddr(false);
+		while (self->recv(self->getSocket(true), aComm, true, &tv));
+		pthread_cond_signal(&self->cond_wait);
+	} catch (COMMException& e) {
+		e.appendInfo("Communicator::setOrderedRecv(void*) Catch(1)");
+		throw;
+	} catch (exception &e) {
+		COMMException ex("Communicator::setOrderedRecv(void*) Catch(1)");
+		ex.appendInfo(e.what());
+		throw ex;
+	}
 
 	return NULL;
 }
 
 void* Communicator::contSend(void* arg) {
-	Communicator *self = (Communicator*) arg;
-	string temp;
-	CommObj aComm;
-	u_int counter = 1, timer = 500000;
-	// cout << "sending thread setup" << endl;
-	while (self->autoMarkSeq) {
+	int numberOfMessages = 15;
+	try {
+		Communicator *self = (Communicator*) arg;
+		string temp;
+		CommObj aComm;
+		u_int counter = 1, timer = 40000;
+		// cout << "sending thread setup" << endl;
+		while (self->autoMarkSeq && counter <= numberOfMessages) {
+			pthread_mutex_lock(&self->unstableQueueLock);
+			temp = "Random Message " + itos(counter++);
+			aComm.setValues('M', self->getAliasPid(), temp, self->getCastAddr(true));
+			aComm.markSeqNum(self->lClock->markEvent());
+			// cout << "Sending: " << aComm.getEncoded() << endl;
+			self->unstableQueue.push(aComm);
+			self->send(self->getSocket(true), aComm);
+			//Immediately send ACK
+			aComm.control = 'A';
+			self->send(self->getSocket(true), aComm);
+			pthread_mutex_unlock(&self->unstableQueueLock);
+			usleep(timer);
+		}
 		pthread_mutex_lock(&self->unstableQueueLock);
-		temp = "Random Message " + itos(counter++);
-		aComm.setValues('M', self->getFPID(), temp, self->getCastAddr(true));
-		aComm.markSeqNum(self->lClock->markEvent());
-		// cout << "Send: [" << mComm->getStringSeq() << "] " << mComm->msg << endl;
-		self->send(self->getSocket(true), aComm);
-
-		self->unstableQueue.push(aComm);
-		//Immediately send ACK
-		aComm.control = 'A';
-		self->send(self->getSocket(true), aComm);
+		self->setAutoMark(false);
 		pthread_mutex_unlock(&self->unstableQueueLock);
-		// usleep(timer);
+	} catch (COMMException& e) {
+		e.appendInfo("Communicator::contSend(void*)");
+		throw;
 	}
 
 	return NULL;
@@ -579,7 +687,7 @@ void Communicator::initiateGroupComm() {
 	temp += itos(sin->sin_addr.s_addr) + " " + itos(sin->sin_port);
 	delete sin;
 
-	mComm.setValues(ENQ, fixedPID, temp, &mOutAddr);
+	mComm.setValues(ENQ, getAliasPid(), temp, &mOutAddr);
 	if (master == pid) {
 		send(mSocket, mComm);
 	}
@@ -587,7 +695,7 @@ void Communicator::initiateGroupComm() {
 
 	//Receiving from master
 	if (recv(mSocket, mComm, NULL) && mComm.control == ENQ) {
-		mComm.setValues(ENQ, fixedPID, temp, Communicator::decodeSock(mComm.msg));
+		mComm.setValues(ENQ, getAliasPid(), temp, Communicator::decodeSock(mComm.msg));
 		send(this->getSocket(false), mComm);
 	}
 
@@ -606,7 +714,7 @@ void Communicator::initiateGroupComm() {
 		while (recv(this->getSocket(false), mComm, NULL) && mComm.control == ENQ) {
 			temp += mComm.pid + " " + mComm.msg + " ";
 		}
-		mComm.setValues('L', fixedPID, temp, this->getCastAddr(true));
+		mComm.setValues('L', getAliasPid(), temp, this->getCastAddr(true));
 		send(this->getSocket(true), mComm);
 	}
 	mComm.addr = this->getCastAddr(false);
@@ -627,7 +735,7 @@ void Communicator::initiateGroupComm() {
 	sort(sortedPIDs.begin(), sortedPIDs.end());
 	master = sortedPIDs[0];
 
-	cout << "New Leader: " << master << endl;
+	cout << endl << "New Leader: " << master << endl;
 	cout << "Members [" << sortedPIDs.size() << "]: ";
 
 	for (int i = 0; i < sortedPIDs.size(); i++) {
@@ -635,7 +743,7 @@ void Communicator::initiateGroupComm() {
 		processAlias.insert(pair<long int, int>(sortedPIDs[i], i));
 	}
 
-	cout << endl;
+	cout << endl << endl;
 }
 
 void Communicator::berkleySync() {
