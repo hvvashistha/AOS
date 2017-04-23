@@ -28,7 +28,7 @@ int main(int argc, char const *argv[]) {
 		cout << endl << endl << "----Multicast total ordered----" << endl << endl;
 
 		sleep(5);
-		comm.setAutoMark(true);
+		comm.setAutoMark();
 
 		struct timespec tv;
 		tv.tv_sec = 1;
@@ -37,7 +37,7 @@ int main(int argc, char const *argv[]) {
 		mComm.setValues('T', comm.getFPID(), "", comm.getCastAddr(false));
 		int i = 1;
 
-		while (comm.recv(comm.getSocket(true), mComm, false, &tv)) {
+		while (comm.recv(comm.getSocket(true), &mComm, false, &tv)) {
 			cout << i++ << ": " << mComm.getEncoded() << endl;
 		}
 		comm.multicastFinish();
