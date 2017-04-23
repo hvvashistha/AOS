@@ -29,7 +29,7 @@
 using namespace std;
 typedef struct sockaddr_in SockAddr;
 
-string itos(long int num) {
+string itos(long num) {
 	ostringstream oss;
 	oss << num;
 	if (!oss.good()) throw COMMException("itos(): stream error");
@@ -43,8 +43,8 @@ string dtos(double num) {
 	return oss.str();
 }
 
-long int randomize() {
-	uniform_int_distribution<int> pidDist(0, 99999999);
+long randomize() {
+	uniform_int_distribution<long> pidDist(0, 99999999);
 	random_device rd1;
 	return pidDist(rd1);
 }
@@ -98,7 +98,7 @@ public:
 		return this;
 	}
 
-	CommObj* markSeqNum(long int seq) {
+	CommObj* markSeqNum(long seq) {
 		ostringstream oss;
 		string S = (itos(seq) + "." + pid);
 		oss << setfill('0') << setw(15) << S;
@@ -149,14 +149,14 @@ public:
 
 class Communicator {
 private:
-	unordered_map<int, SockAddr*> memberList;
+	unordered_map<long, SockAddr*> memberList;
 	int mSocket, pSocket;
 	SockAddr mOutAddr, mInAddr;
-	long int master;
-	long int pid;
+	long master;
+	long pid;
 	bool autoMarkSeq = false;
 	string fixedPID, selfAlias;
-	unordered_map <long int, int> processAlias;
+	unordered_map <long, int> processAlias;
 	unordered_map<double, Msg*> acks;
 	priority_queue<double, vector<double>, greater<double>> unstableQueue;
 	queue<CommObj> stableQueue;
@@ -176,6 +176,7 @@ private:
 
 
 public:
+	queue<CommObj> rawQueue;
 	Communicator(bool master, Clock* lClock, bool setupGroup) {
 		this->lClock = lClock;
 		pthread_mutex_init(&stableQueueLock, NULL);
@@ -212,6 +213,7 @@ public:
 	~Communicator () {
 		while (!unstableQueue.empty()) unstableQueue.pop();
 		while (!stableQueue.empty()) stableQueue.pop();
+		while (!rawQueue.empty()) rawQueue.pop();
 		for(auto ackPair: acks) {
 			delete ackPair.second;
 		}
@@ -251,11 +253,11 @@ public:
 		}
 	}
 
-	int getMaster() {
+	long getMaster() {
 		return master;
 	}
 
-	int getpid() {
+	long getpid() {
 		return pid;
 	}
 
@@ -263,7 +265,7 @@ public:
 		return processAlias.at(pid);
 	}
 
-	int getRank(long int pID) {
+	int getRank(long pID) {
 		return processAlias.at(pID);
 	}
 
@@ -278,11 +280,11 @@ public:
 		return mComm;
 	}
 
-	unordered_map<int, SockAddr*> getMemberList() {
+	unordered_map<long, SockAddr*> getMemberList() {
 		return memberList;
 	}
 
-	SockAddr* getPointAddr(int member) {
+	SockAddr* getPointAddr(long member) {
 		return memberList.at(member);
 	}
 
@@ -413,6 +415,10 @@ void* Communicator::setOrderedRecv(void* arg) {
 
 		if (self.recv(self.getSocket(true), &aComm, true, &tv)) {
 			if (DEBUG) cout << "REC: [" << aComm.pid << "] " << aComm.getEncoded() << endl;
+
+			if (aComm.control == 'M')
+				self.rawQueue.push(aComm);
+
 			senderRecv = aComm.pid == self.getAliasPid();
 			emptyRecv = false;
 
@@ -712,7 +718,7 @@ void Communicator::initiateGroupComm() {
 		std::cerr << "Set Timeout Error";
 	}
 	cout << "Discovering multicast group members, 2 seconds advertisement window" << endl;
-	vector<long int> sortedPIDs;
+	vector<long> sortedPIDs;
 
 	if (isMaster()) {
 		temp = "";
@@ -727,12 +733,12 @@ void Communicator::initiateGroupComm() {
 	if (recv(this->getSocket(true), mComm, NULL) && mComm.control == 'L') {
 		istringstream iss(mComm.msg);
 		while (Communicator::decodeGroupCast(iss, mComm) && !iss.eof()) {
-			long int iPID = stol(mComm.pid);
+			long iPID = stol(mComm.pid);
 			if (memberList.count(iPID) > 0) {
 				cerr << "Process Id " << iPID << " clashed, exiting!" << endl;
 				exit(1);
 			}
-			memberList.insert(std::pair<int, SockAddr*>(iPID, mComm.addr));
+			memberList.insert(std::pair<long, SockAddr*>(iPID, mComm.addr));
 			sortedPIDs.push_back(iPID);
 		}
 	}
@@ -745,14 +751,14 @@ void Communicator::initiateGroupComm() {
 
 	for (int i = 0; i < sortedPIDs.size(); i++) {
 		cout << sortedPIDs[i] << "[" << i << "]  ";
-		processAlias.insert(pair<long int, int>(sortedPIDs[i], i));
+		processAlias.insert(pair<long, int>(sortedPIDs[i], i));
 	}
 
 	cout << endl << endl;
 }
 
 void Communicator::berkleySync() {
-	std::unordered_map <int, int> pClock;
+	std::unordered_map <long, int> pClock;
 	CommObj mComm = getCommDef();
 
 	mComm.setValues('B', getFPID(), itos(lClock->getClock()), getCastAddr(true));
@@ -771,8 +777,8 @@ void Communicator::berkleySync() {
 
 	if (recv(getSocket(true), mComm, NULL) && mComm.control == 'B') {
 		cout << "Berkley Sync stage 2, Sending Deltas back to master" << endl;
-		int returnToProcess = stol(mComm.pid);
-		int delta = stol(mComm.msg) - lClock->getClock();
+		long returnToProcess = stol(mComm.pid);
+		long delta = stol(mComm.msg) - lClock->getClock();
 		mComm.setValues('B', getFPID(), itos(delta), getPointAddr(returnToProcess));
 		send(getSocket(false), mComm);
 	}
@@ -787,7 +793,7 @@ void Communicator::berkleySync() {
 		for (int i = getGroupSize(); i > 0 && recv(getSocket(false), mComm, NULL) && mComm.control == 'B'; i--) {
 			receivedDelta = stol(mComm.msg);
 			cout << "Received Delta from " << mComm.pid << ": " << mComm.msg << endl;
-			pClock.insert(pair<int, int>(stol(mComm.pid), receivedDelta));
+			pClock.insert(pair<long, int>(stol(mComm.pid), receivedDelta));
 			averageDelta += receivedDelta;
 		}
 		cout << endl;
