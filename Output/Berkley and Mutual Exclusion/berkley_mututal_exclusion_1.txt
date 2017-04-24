@@ -1,0 +1,32 @@
+master
+PID: 3264003823011
+Discovering multicast group members, 2 seconds advertisement window
+
+New Leader: 3264003823011
+Members [3]: 3264003823011[0]  5804989234728[1]  8966943338870[2]  
+
+Berkley Sync, clock value: 41
+Berkley Sync stage 1, Sending master clock
+Berkley Sync stage 2, Sending Deltas back to master
+Berkley Sync stage 3, Calculating average delta and sending back offsets
+Comm size: 3
+Received Delta from 005804989234728: 25
+Received Delta from 003264003823011: 0
+Received Delta from 008966943338870: -41
+
+Average Delta: -5.33333
+Berkley Sync stage 4, Adjusting offset: 5.33333
+Original Clock Sequence: 41
+Clock (Synced): 46
+
+
+----Mutual Exclusion (Token Ring)----
+
+Counter value read: 23
+Counter value read: 26
+Counter value read: 29
+Counter value read: 32
+Counter value read: 35
+Counter value read: 38
+
+Fin.
